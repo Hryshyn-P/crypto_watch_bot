@@ -14,10 +14,11 @@ const bot = new TelegramBot(token, { polling: true });
 const symbolRegex = /^[\w.-]+$/;
 const onlyNumRegex = /\d+/;
 
+let involvedSymbols = []; // Use for input validation in future...
 let stop = false;
 let message;
-let numOfPriceDigits;
-let totalProc = [];
+let priceLength;
+let symbolInfo = [];
 
 const getAllSymbols = (symbols) => {
     const coins = []
@@ -44,13 +45,16 @@ async function getTradingPairPrice(symbol, intervalId, chatId) {
     try {
         if (symbol.length < 5) {
             message = await Axios.get(`${process.env.LAST_PRICE_URI}=${symbol}BUSD`)
+            involvedSymbols = [...new Set([...involvedSymbols, `${symbol}BUSD`])]
             return symbol;
         }
         if (symbol.startsWith('["') && symbol.endsWith('"]')) {
             message = await Axios.get(`${process.env.LAST_PRICE_URI}s=${symbol}`);
+            message.data.forEach(e => involvedSymbols = [...new Set([...involvedSymbols, e.symbol])]);
             return symbol;
         }
         message = await Axios.get(`${process.env.LAST_PRICE_URI}=${symbol}`)
+        involvedSymbols = [...new Set([...involvedSymbols, symbol])]
         return symbol;
     } catch (err) {
         if (symbol.length < 5) {
@@ -67,34 +71,43 @@ async function getTradingPairPrice(symbol, intervalId, chatId) {
     }
 }
 
-function calculateProcentOfNextPrice(prevPrice, numOfPriceDigits, isSingleSymbol) {
+function calculateProcentOfNextPrice(priceLength, isSingleSymbol) {
     if (message != undefined) {
-        let prevPrices = [];
+        const processSingleSymbol = (price, s, index) => {
+            // #region Fill symbol data obj
+            let i = symbolInfo.findIndex(el => el[s]);
 
-        const processSingleSymbol = (pPrice, price, index) => {
-            const priceVector = (pPrice > price) ? ' 🍅' : ' 🥝+';
-            const procent = helper.isWhatPercentOf(pPrice || price, price);
+            try {
+                symbolInfo[i][s];
+            } catch (err) {
+                symbolInfo.push({ [s]: { tProc: 0 } });
+                i = symbolInfo.findIndex(el => el[s]);
+            }
 
-            if (totalProc[index] === undefined) totalProc[index] = 0;
-            totalProc[index] += procent;
+            const priceVector = (symbolInfo[i][s].prevPrice > price) ? ' 🍅' : ' 🥝+';
+            const procent = helper.isWhatPercentOf(symbolInfo[i][s].prevPrice || price, price);
 
-            isSingleSymbol ? prevPrice = price : prevPrices[index] = price
+            symbolInfo[i][s].tProc += procent;
+            symbolInfo[i][s].prevPrice = price;
+            symbolInfo[i][s].priceVector = priceVector;
+            symbolInfo[i][s].procent = procent;
+            // #endregion
 
-            // #region change price length
-            if (numOfPriceDigits && helper.inRange(numOfPriceDigits) &&
-                numOfPriceDigits < `${String(price).replace(/\D/g, '')}`.length) {
+            // #region Change price length
+            if (priceLength && helper.inRange(priceLength) &&
+                priceLength < `${String(price).replace(/\D/g, '')}`.length) {
 
-                const tempPrice = String(price).substring(0, numOfPriceDigits);
+                const tempPrice = String(price).substring(0, priceLength);
                 price = tempPrice.includes('.') ?
-                    helper.trimNum(String(price).substring(0, numOfPriceDigits + 1)) :
-                    helper.trimNum(String(price).substring(0, numOfPriceDigits));
+                    helper.trimNum(String(price).substring(0, priceLength + 1)) :
+                    helper.trimNum(String(price).substring(0, priceLength));
             }
             // #endregion
 
-            // #region output string concatenation
-            price += priceVector + `${procent.toFixed(3)}%` + (String(totalProc[index]).startsWith('-') ?
-                ` ⬇️${helper.trimNum(String(totalProc[index]).substring(0, 4))}` :
-                ` ⬆️+${helper.trimNum(String(totalProc[index]).substring(0, 3))}`);
+            // #region Build output string
+            price += priceVector + `${procent.toFixed(3)}%` + (String(symbolInfo[i][s].tProc).startsWith('-') ?
+                ` ⬇️${helper.trimNum(String(symbolInfo[i][s].tProc).substring(0, 4))}` :
+                ` ⬆️+${helper.trimNum(String(symbolInfo[i][s].tProc).substring(0, 3))}`);
             if (price.endsWith('0')) price = price.slice(0, -4) + '🍋0';
             isSingleSymbol ? message.data.price = price : message.data[index].price = price;
             // #endregion
@@ -102,12 +115,10 @@ function calculateProcentOfNextPrice(prevPrice, numOfPriceDigits, isSingleSymbol
 
         if (!isSingleSymbol) {
             message.data.forEach((e, i) => {
-                processSingleSymbol(+prevPrice[i], +e.price, i);
+                processSingleSymbol(+e.price, e.symbol, i);
             })
-            return prevPrices;
         } else {
-            processSingleSymbol(+prevPrice, +message.data.price);
-            return prevPrice;
+            processSingleSymbol(+message.data.price, message.data.symbol);
         }
     }
 }
@@ -124,9 +135,9 @@ async function printTradingPairPrice(chatId, symbol) {
 
 
 bot.on('message', async (msg) => {
-    // set number of price digits with command "/num" like "/num 10", by default 14
+    // Set number of price digits with command "/num" like "/num 10", by default 14
     if (msg.text.startsWith('/num ') && helper.inRange(+msg.text.match(onlyNumRegex))) {
-        numOfPriceDigits = +msg.text.match(onlyNumRegex);
+        priceLength = +msg.text.match(onlyNumRegex);
     }
 
     stop = false;
@@ -134,8 +145,6 @@ bot.on('message', async (msg) => {
     if (msg.text === '/symbols') {
         await printAllSymbols(msg.chat.id);
     } else {
-        let prevPrice;
-        let prevPrices = [];
         let arrOfmessages = [];
         let multipartMessage = '';
 
@@ -146,7 +155,7 @@ bot.on('message', async (msg) => {
             const returnedSymbols = await getTradingPairPrice('["' + symbols.join('","') + '"]', intervalId, msg.chat.id);
 
             if (returnedSymbols !== 'error') {
-                prevPrices = calculateProcentOfNextPrice(prevPrices, numOfPriceDigits, false);
+                calculateProcentOfNextPrice(priceLength, false);
                 message.data.forEach(async e => {
                     if (e.symbol.endsWith('USDT') || e.symbol.endsWith('BUSD')) {
                         e.symbol = e.symbol.slice(0, -4);
@@ -170,8 +179,8 @@ bot.on('message', async (msg) => {
         // #region Cycle for sending messages
         const intervalId = setInterval(async () => {
             if (msg.text === '/stop' || stop === true) {
-                numOfPriceDigits = undefined;
-                totalProc = [];
+                priceLength = undefined;
+                symbolInfo = [];
                 stop = true;
                 clearInterval(intervalId);
                 return;
@@ -194,7 +203,7 @@ bot.on('message', async (msg) => {
                     if (symbol) {
                         symbol = await getTradingPairPrice(symbol, intervalId, msg.chat.id);
                         if (symbol !== 'error') {
-                            prevPrice = calculateProcentOfNextPrice(prevPrice, numOfPriceDigits, true);
+                            calculateProcentOfNextPrice(priceLength, true);
                             await printTradingPairPrice(msg.chat.id, symbol);
                         }
                     }
