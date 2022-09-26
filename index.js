@@ -14,11 +14,13 @@ const bot = new TelegramBot(token, { polling: true });
 const symbolRegex = /^[\w.-]+$/;
 const onlyNumRegex = /\d+/;
 
-let involvedSymbols = []; // Use for input validation in future...
+let involvedSymbols = [];
 let stop = false;
 let message;
 let priceLength;
 let symbolInfo = [];
+let firstMessage = true;
+let initIntervalID;
 
 const getAllSymbols = (symbols) => {
     const coins = []
@@ -43,30 +45,14 @@ async function printAllSymbols(chatId) {
 
 async function getTradingPairPrice(symbol, intervalId, chatId) {
     try {
-        if (symbol.length < 5) {
-            message = await Axios.get(`${process.env.LAST_PRICE_URI}=${symbol}BUSD`)
-            involvedSymbols = [...new Set([...involvedSymbols, `${symbol}BUSD`])]
-            return symbol;
-        }
         if (symbol.startsWith('["') && symbol.endsWith('"]')) {
             message = await Axios.get(`${process.env.LAST_PRICE_URI}s=${symbol}`);
             message.data.forEach(e => involvedSymbols = [...new Set([...involvedSymbols, e.symbol])]);
             return symbol;
         }
-        message = await Axios.get(`${process.env.LAST_PRICE_URI}=${symbol}`)
-        involvedSymbols = [...new Set([...involvedSymbols, symbol])]
-        return symbol;
     } catch (err) {
-        if (symbol.length < 5) {
-            await bot.sendMessage(chatId, `${err?.response?.data?.msg} Or pair ${symbol} - BUSD missing. 😕` || err.message);
-        } else if (symbol.startsWith('["') && symbol.endsWith('"]')) {
-            await bot.sendMessage(chatId, `${err?.response?.data?.msg} Wrong dataset: ${symbol} 😕` || err.message);
-        }
-        else {
-            await bot.sendMessage(chatId, `${err?.response?.data?.msg} Or pair ${symbol} missing. 😕` || err.message);
-        }
-        clearInterval(intervalId);
-        stop = true;
+        await bot.sendMessage(chatId, `${err?.response?.data?.msg} Wrong dataset: ${symbol} 😕` || err.message);
+        terminateSender(intervalId);
         return 'error';
     }
 }
@@ -123,14 +109,19 @@ function calculateProcentOfNextPrice(priceLength, isSingleSymbol) {
     }
 }
 
-async function printTradingPairPrice(chatId, symbol) {
-    if (message != undefined) {
-        if (symbol.endsWith('USDT') || symbol.endsWith('BUSD')) {
-            symbol = symbol.slice(0, -4);
-        }
-        await bot.sendMessage(chatId, `${symbol === 'BTC' ? `🦁${symbol}` : `🦎${symbol}`}: ${message.data.price}`);
-        message = undefined;
-    }
+function upsertSymbols(msgText) {
+    return _.uniq(_.uniq(msgText.split(' ').map(s => { return s.toUpperCase() }))
+        .map(s => { return s.length < 5 ? `${s}BUSD` : s })
+        .concat(involvedSymbols));
+}
+
+function terminateSender(intervalId) {
+    priceLength = undefined;
+    symbolInfo = [];
+    involvedSymbols = [];
+    firstMessage = true;
+    stop = true;
+    clearInterval(intervalId);
 }
 
 
@@ -149,9 +140,7 @@ bot.on('message', async (msg) => {
         let multipartMessage = '';
 
         async function processMultipleSymbols(msg) {
-            const symbols = _.uniq(msg.text.split(' ').map(s => { return s.toUpperCase() }))
-                .map(s => { return s.length < 5 ? `${s}BUSD` : s });
-
+            const symbols = upsertSymbols(msg.text);
             const returnedSymbols = await getTradingPairPrice('["' + symbols.join('","') + '"]', intervalId, msg.chat.id);
 
             if (returnedSymbols !== 'error') {
@@ -163,9 +152,12 @@ bot.on('message', async (msg) => {
                     arrOfmessages.push(`${e.symbol === 'BTC' ? `🦁${e.symbol}` :
                         `🦎${e.symbol}`}: ${e.price}\n`)
                 })
+            } else {
+                return;
             }
             arrOfmessages.sort().map((part, i) => {
-                i === 0 ? multipartMessage += `🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜\n${part}` : multipartMessage += part
+                i === 0 && involvedSymbols.length > 1 ?
+                    multipartMessage += `🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜\n${part}` : multipartMessage += part
             });
 
             arrOfmessages = [];
@@ -179,34 +171,24 @@ bot.on('message', async (msg) => {
         // #region Cycle for sending messages
         const intervalId = setInterval(async () => {
             if (msg.text === '/stop' || stop === true) {
-                priceLength = undefined;
-                symbolInfo = [];
-                stop = true;
-                clearInterval(intervalId);
+                terminateSender(intervalId);
                 return;
             } else {
                 stop = false;
             }
-            if (msg.text.split(' ').length > 1 &&
-                msg.text.split(' ').length <= 20 &&
-                msg.text.split(' ').every(s => { return s.match(symbolRegex) })) {
+            if ((msg.text.split(' ').length <= 20 &&
+                msg.text.split(' ').every(s => { return s.match(symbolRegex) })) ||
+                msg.text === '/start') {
 
-                await processMultipleSymbols(msg)
-
-            } else {
-                if (!msg.text.startsWith('/num ')) {
-                    let symbol;
-                    msg.text.match(symbolRegex) ?
-                        symbol = msg.text.toUpperCase() :
-                        await processMultipleSymbols({ text: 'btc eth etc bnb', chat: { id: msg.chat.id } });
-
-                    if (symbol) {
-                        symbol = await getTradingPairPrice(symbol, intervalId, msg.chat.id);
-                        if (symbol !== 'error') {
-                            calculateProcentOfNextPrice(priceLength, true);
-                            await printTradingPairPrice(msg.chat.id, symbol);
-                        }
-                    }
+                if (initIntervalID === Number(intervalId) || firstMessage) {
+                    initIntervalID = Number(intervalId);
+                    firstMessage = false;
+                    msg.text === '/start' ?
+                        await processMultipleSymbols({ text: 'btc eth etc bnb', chat: { id: msg.chat.id } }) :
+                        await processMultipleSymbols(msg);
+                } else {
+                    involvedSymbols = msg.text === '/start' ? upsertSymbols('btc eth etc bnb') : upsertSymbols(msg.text);
+                    clearInterval(intervalId);
                 }
             }
         }, 4000);
