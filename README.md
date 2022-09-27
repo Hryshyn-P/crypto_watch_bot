@@ -1,4 +1,5 @@
 # ![#c5f015](https://via.placeholder.com/15/c5f015/c5f015.png) `Binance Spot Watch - Telegram Bot 🤖`
+### https://t.me/crafty_weasel_bot
 ***************************
 ## Telegram bot for monitoring cryptocurrencies on the spot market of the Binance exchange.
 - Price comparison
