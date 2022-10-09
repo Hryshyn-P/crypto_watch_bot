@@ -21,6 +21,7 @@ let priceLength;
 let symbolInfo = [];
 let firstMessage = true;
 let initIntervalID;
+let multipartMessage = '';
 
 const getAllSymbols = (symbols) => {
   const coins = [];
@@ -124,6 +125,7 @@ function terminateSender(intervalId) {
   involvedSymbols = [];
   firstMessage = true;
   stop = true;
+  multipartMessage = '';
   clearInterval(intervalId);
 }
 
@@ -131,7 +133,6 @@ async function processMultipleSymbols(msg, intervalId) {
   const symbols = upsertSymbols(msg.text);
   const returnedSymbols = await getTradingPairPrice('["' + symbols.join('","') + '"]', intervalId, msg.chat.id);
   let arrOfmessages = [];
-  let multipartMessage = '';
 
   if (returnedSymbols !== 'error') {
     calculateProcentOfNextPrice(priceLength, false);
