@@ -13,15 +13,7 @@ const token = process.env.TELEGRAM_BOT_KEY;
 const bot = new TelegramBot(token, {polling: true});
 const symbolRegex = /^[\w.-]+$/;
 const onlyNumRegex = /\d+/;
-
-let involvedSymbols = [];
-let stop = false;
-let message;
-let priceLength;
-let symbolInfo = [];
-let firstMessage = true;
-let initIntervalID;
-let multipartMessage = '';
+const chats = {};
 
 const getAllSymbols = (symbols) => {
   const coins = [];
@@ -44,99 +36,85 @@ async function printAllSymbols(chatId) {
   }
 }
 
-async function getTradingPairPrice(symbol, intervalId, chatId) {
+async function getTradingPairPrice(symbol, chatId) {
   try {
     if (symbol.startsWith('["') && symbol.endsWith('"]')) {
-      message = await Axios.get(`${process.env.LAST_PRICE_URI}s=${symbol}`);
-      message.data.forEach((e) => involvedSymbols = [...new Set([...involvedSymbols, e.symbol])]);
+      chats[chatId].message = await Axios.get(`${process.env.LAST_PRICE_URI}s=${symbol}`);
+      chats[chatId].message.data.forEach((e) => chats[chatId]
+        .involvedSymbols = [...new Set([...chats[chatId].involvedSymbols, e.symbol])]);
       return symbol;
     }
   } catch (err) {
     await bot.sendMessage(chatId, `${err?.response?.data?.msg} Wrong dataset: ${symbol} 😕` || err.message);
-    terminateSender(intervalId);
+    terminateSender(chatId);
     return 'error';
   }
 }
 
-function calculateProcentOfNextPrice(priceLength, isSingleSymbol) {
-  if (message != undefined) {
-    const processSingleSymbol = (price, s, index) => {
-      // #region Fill symbol data obj
-      let i = symbolInfo.findIndex((el) => el[s]);
+function processSingleSymbol(chatId, priceLength, price, smb, idx) {
+  if (!chats[chatId][smb]) chats[chatId][smb] = {deviation: 0, prevPrice: 0};
 
-      try {
-        symbolInfo[i][s];
-      } catch (err) {
-        symbolInfo.push({[s]: {tProc: 0}});
-        i = symbolInfo.findIndex((el) => el[s]);
-      }
+  const priceVector = (chats[chatId][smb].prevPrice > price) ? ' 🍅' : ' 🥝+';
+  const procent = helper.isWhatPercentOf(chats[chatId][smb].prevPrice || price, price);
 
-      const priceVector = (symbolInfo[i][s].prevPrice > price) ? ' 🍅' : ' 🥝+';
-      const procent = helper.isWhatPercentOf(symbolInfo[i][s].prevPrice || price, price);
+  chats[chatId][smb] = {
+    deviation: chats[chatId][smb].deviation += procent,
+    prevPrice: price,
+    priceVector,
+    procent,
+  };
+  // #endregion
 
-      symbolInfo[i][s].tProc += procent;
-      symbolInfo[i][s].prevPrice = price;
-      symbolInfo[i][s].priceVector = priceVector;
-      symbolInfo[i][s].procent = procent;
-      // #endregion
+  // #region Change price length
+  if (priceLength && helper.inRange(priceLength) &&
+            priceLength < `${String(price).replace(/\D/g, '')}`.length) {
+    const tempPrice = String(price).substring(0, priceLength);
+    price = tempPrice.includes('.') ?
+      helper.trimNum(String(price).substring(0, priceLength + 1)) :
+      helper.trimNum(String(price).substring(0, priceLength));
+  }
+  // #endregion
 
-      // #region Change price length
-      if (priceLength && helper.inRange(priceLength) &&
-                priceLength < `${String(price).replace(/\D/g, '')}`.length) {
-        const tempPrice = String(price).substring(0, priceLength);
-        price = tempPrice.includes('.') ?
-          helper.trimNum(String(price).substring(0, priceLength + 1)) :
-          helper.trimNum(String(price).substring(0, priceLength));
-      }
-      // #endregion
+  // #region Build output string
+  price += priceVector + `${procent.toFixed(3)}%` + (String(chats[chatId][smb].deviation).startsWith('-') ?
+    ` ⬇️${helper.trimNum(String(chats[chatId][smb].deviation).substring(0, 4))}` :
+    ` ⬆️+${helper.trimNum(String(chats[chatId][smb].deviation).substring(0, 3))}`);
+  if (price.endsWith('0')) price = price.slice(0, -4) + '🍋0';
+  chats[chatId].message.data[idx].price = price;
+  // #endregion
+};
 
-      // #region Build output string
-      price += priceVector + `${procent.toFixed(3)}%` + (String(symbolInfo[i][s].tProc).startsWith('-') ?
-        ` ⬇️${helper.trimNum(String(symbolInfo[i][s].tProc).substring(0, 4))}` :
-        ` ⬆️+${helper.trimNum(String(symbolInfo[i][s].tProc).substring(0, 3))}`);
-      if (price.endsWith('0')) price = price.slice(0, -4) + '🍋0';
-      isSingleSymbol ? message.data.price = price : message.data[index].price = price;
-      // #endregion
-    };
-
-    if (!isSingleSymbol) {
-      message.data.forEach((e, i) => {
-        processSingleSymbol(+e.price, e.symbol, i);
-      });
-    } else {
-      processSingleSymbol(+message.data.price, message.data.symbol);
-    }
+function calculateProcentOfNextPrice(chatId, priceLength) {
+  if (chats[chatId].message) {
+    chats[chatId].message.data.forEach((e, i) => {
+      processSingleSymbol(chatId, priceLength, +e.price, e.symbol, i);
+    });
   }
 }
 
-function upsertSymbols(msgText) {
-  return _.uniq(_.uniq(msgText.split(' ').map((s) => {
+function upsertSymbols(msg) {
+  return _.uniq(_.uniq(msg.text.split(' ').map((s) => {
     return s.toUpperCase();
   }))
     .map((s) => {
-      return s.length < 5 ? `${s}BUSD` : s;
+      return s.length < 6 ? `${s}BUSD` : s;
     })
-    .concat(involvedSymbols));
+    .concat(chats[msg.chat.id].involvedSymbols));
 }
 
-function terminateSender(intervalId) {
-  priceLength = undefined;
-  symbolInfo = [];
-  involvedSymbols = [];
-  firstMessage = true;
-  stop = true;
-  multipartMessage = '';
-  clearInterval(intervalId);
+function terminateSender(chatId) {
+  clearInterval(chats[chatId].intervalId);
+  chats[chatId] = {};
 }
 
-async function processMultipleSymbols(msg, intervalId) {
-  const symbols = upsertSymbols(msg.text);
-  const returnedSymbols = await getTradingPairPrice('["' + symbols.join('","') + '"]', intervalId, msg.chat.id);
+async function processMultipleSymbols(msg) {
+  const symbols = upsertSymbols(msg);
+  const returnedSymbols = await getTradingPairPrice('["' + symbols.join('","') + '"]', msg.chat.id);
   let arrOfmessages = [];
 
   if (returnedSymbols !== 'error') {
-    calculateProcentOfNextPrice(priceLength, false);
-    message.data.forEach(async (e) => {
+    calculateProcentOfNextPrice(msg.chat.id, chats[msg.chat.id].priceLength);
+    chats[msg.chat.id].message.data.forEach(async (e) => {
       if (e.symbol.endsWith('USDT') || e.symbol.endsWith('BUSD')) {
         e.symbol = e.symbol.slice(0, -4);
       }
@@ -147,48 +125,58 @@ async function processMultipleSymbols(msg, intervalId) {
     return;
   }
   arrOfmessages.sort().map((part, i) => {
-    i === 0 && involvedSymbols.length > 1 ?
-      multipartMessage += `🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜\n${part}` : multipartMessage += part;
+    i === 0 && chats[msg.chat.id].involvedSymbols.length > 1 ?
+      chats[msg.chat.id].multipartMessage += `🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜\n${part}` :
+      chats[msg.chat.id].multipartMessage += part;
   });
 
   arrOfmessages = [];
 
-  if (multipartMessage !== '') {
-    await bot.sendMessage(msg.chat.id, multipartMessage);
-    multipartMessage = '';
+  if (chats[msg.chat.id].multipartMessage !== '') {
+    await bot.sendMessage(msg.chat.id, chats[msg.chat.id].multipartMessage);
+    chats[msg.chat.id].multipartMessage = '';
   }
 }
 
 bot.on('message', async (msg) => {
-  stop = false;
+  if (chats[msg.chat.id]?.firstMessage === undefined) {
+    chats[msg.chat.id] = {
+      firstMessage: true,
+      involvedSymbols: [],
+      multipartMessage: '',
+    };
+  }
+  chats[msg.chat.id].request = msg;
+
   // Set number of price digits with command "/num" like "/num 10", by default 14
   if (msg.text.startsWith('/num ') && helper.inRange(+msg.text.match(onlyNumRegex))) {
-    priceLength = +msg.text.match(onlyNumRegex);
+    chats[msg.chat.id].priceLength = +msg.text.match(onlyNumRegex);
   }
   if (msg.text === '/symbols') {
     await printAllSymbols(msg.chat.id);
   } else {
     // #region Cycle for sending messages
+
     const intervalId = setInterval(async () => {
-      if (msg.text === '/stop' || stop === true) {
-        terminateSender(intervalId);
+      if (!chats[msg.chat.id].intervalId) chats[msg.chat.id].intervalId = intervalId;
+
+      if (msg.text === '/stop') {
+        terminateSender(msg.chat.id);
         return;
-      } else {
-        stop = false;
       }
       if ((msg.text.split(' ').length <= 20 &&
                 msg.text.split(' ').every((s) => {
                   return s.match(symbolRegex);
-                })) ||
-                msg.text === '/start') {
-        if (initIntervalID === Number(intervalId) || firstMessage) {
-          initIntervalID = Number(intervalId);
-          firstMessage = false;
+                })) || msg.text === '/start') {
+        if (chats[msg.chat.id].initIntervalID === Number(intervalId) || chats[msg.chat.id].firstMessage) {
+          chats[msg.chat.id].initIntervalID = Number(intervalId);
+          chats[msg.chat.id].firstMessage = false;
           msg.text === '/start' ?
-            await processMultipleSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}, intervalId) :
-            await processMultipleSymbols(msg, intervalId);
+            await processMultipleSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) :
+            await processMultipleSymbols(msg);
         } else {
-          involvedSymbols = msg.text === '/start' ? upsertSymbols('btc eth etc bnb') : upsertSymbols(msg.text);
+          chats[msg.chat.id].involvedSymbols = msg.text === '/start' ?
+            upsertSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) : upsertSymbols(msg);
           clearInterval(intervalId);
         }
       }
