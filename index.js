@@ -40,25 +40,26 @@ async function getTradingPairPrice(symbol, chatId) {
   try {
     if (symbol.startsWith('["') && symbol.endsWith('"]')) {
       chats[chatId].message = await Axios.get(`${process.env.LAST_PRICE_URI}s=${symbol}`);
-      chats[chatId].message.data.forEach((e) => chats[chatId]
+      chats[chatId].message?.data.forEach((e) => chats[chatId]
         .involvedSymbols = [...new Set([...chats[chatId].involvedSymbols, e.symbol])]);
       return symbol;
     }
   } catch (err) {
-    await bot.sendMessage(chatId, `${err?.response?.data?.msg} Wrong dataset: ${symbol} 😕` || err.message);
+    await bot.sendMessage(chatId, err?.response?.data?.msg ?
+      `${err?.response?.data?.msg} Wrong dataset: ${symbol} 😕` : _.isEmpty(err.message) ? 'server error' : err.message);
     terminateSender(chatId);
     return 'error';
   }
 }
 
 function processSingleSymbol(chatId, priceLength, price, smb, idx) {
-  if (!chats[chatId][smb]) chats[chatId][smb] = {deviation: 0, prevPrice: 0};
+  if (!chats[chatId].symbols[smb]) chats[chatId].symbols[smb] = {deviation: 0, prevPrice: 0};
 
-  const priceVector = (chats[chatId][smb].prevPrice > price) ? ' 🍅' : ' 🥝+';
-  const procent = helper.isWhatPercentOf(chats[chatId][smb].prevPrice || price, price);
+  const priceVector = (chats[chatId].symbols[smb].prevPrice > price) ? ' 🍅' : ' 🥝+';
+  const procent = helper.isWhatPercentOf(chats[chatId].symbols[smb].prevPrice || price, price);
 
-  chats[chatId][smb] = {
-    deviation: chats[chatId][smb].deviation += procent,
+  chats[chatId].symbols[smb] = {
+    deviation: chats[chatId].symbols[smb].deviation += procent,
     prevPrice: price,
     priceVector,
     procent,
@@ -76,9 +77,9 @@ function processSingleSymbol(chatId, priceLength, price, smb, idx) {
   // #endregion
 
   // #region Build output string
-  price += priceVector + `${procent.toFixed(3)}%` + (String(chats[chatId][smb].deviation).startsWith('-') ?
-    ` ⬇️${helper.trimNum(String(chats[chatId][smb].deviation).substring(0, 4))}` :
-    ` ⬆️+${helper.trimNum(String(chats[chatId][smb].deviation).substring(0, 3))}`);
+  price += priceVector + `${procent.toFixed(3)}%` + (String(chats[chatId].symbols[smb].deviation).startsWith('-') ?
+    ` ⬇️${helper.trimNum(String(chats[chatId].symbols[smb].deviation).substring(0, 4))}` :
+    ` ⬆️+${helper.trimNum(String(chats[chatId].symbols[smb].deviation).substring(0, 3))}`);
   if (price.endsWith('0')) price = price.slice(0, -4) + '🍋0';
   chats[chatId].message.data[idx].price = price;
   // #endregion
@@ -86,7 +87,7 @@ function processSingleSymbol(chatId, priceLength, price, smb, idx) {
 
 function calculateProcentOfNextPrice(chatId, priceLength) {
   if (chats[chatId].message) {
-    chats[chatId].message.data.forEach((e, i) => {
+    chats[chatId].message?.data.forEach((e, i) => {
       processSingleSymbol(chatId, priceLength, +e.price, e.symbol, i);
     });
   }
@@ -104,7 +105,7 @@ function upsertSymbols(msg) {
 
 function terminateSender(chatId) {
   clearInterval(chats[chatId].intervalId);
-  chats[chatId] = {};
+  chats[chatId].forDeletion ? delete chats[chatId] : chats[chatId] = {forDeletion: true};
 }
 
 async function processMultipleSymbols(msg) {
@@ -114,7 +115,7 @@ async function processMultipleSymbols(msg) {
 
   if (returnedSymbols !== 'error') {
     calculateProcentOfNextPrice(msg.chat.id, chats[msg.chat.id].priceLength);
-    chats[msg.chat.id].message.data.forEach(async (e) => {
+    chats[msg.chat.id].message?.data.forEach(async (e) => {
       if (e.symbol.endsWith('USDT') || e.symbol.endsWith('BUSD')) {
         e.symbol = e.symbol.slice(0, -4);
       }
@@ -132,55 +133,60 @@ async function processMultipleSymbols(msg) {
 
   arrOfmessages = [];
 
-  if (chats[msg.chat.id].multipartMessage !== '') {
+  if (!_.isEmpty(chats[msg.chat.id].multipartMessage)) {
     await bot.sendMessage(msg.chat.id, chats[msg.chat.id].multipartMessage);
     chats[msg.chat.id].multipartMessage = '';
   }
 }
 
 bot.on('message', async (msg) => {
-  if (chats[msg.chat.id]?.firstMessage === undefined) {
-    chats[msg.chat.id] = {
-      firstMessage: true,
-      involvedSymbols: [],
-      multipartMessage: '',
+  if (!_.isEmpty(msg.text)) {
+    if (chats[msg.chat.id]?.firstMessage === undefined) {
+      chats[msg.chat.id] = {
+        firstMessage: true,
+        involvedSymbols: [],
+        multipartMessage: '',
+        symbols: {},
+      };
+    }
+    chats[msg.chat.id].request = msg;
+
+    // Set number of price digits with command "/num" like "/num 10", by default 14
+    if (msg.text.startsWith('/num ') && helper.inRange(+msg.text.match(onlyNumRegex))) {
+      chats[msg.chat.id].priceLength = +msg.text.match(onlyNumRegex);
+    }
+    if (msg.text === '/symbols') {
+      await printAllSymbols(msg.chat.id);
+    } else {
+      // #region Cycle for sending messages
+
+      const intervalId = setInterval(async () => {
+        if (chats[msg.chat.id]) {
+          if (!chats[msg.chat.id].intervalId) chats[msg.chat.id].intervalId = intervalId;
+
+          if (msg.text === '/stop') {
+            terminateSender(msg.chat.id);
+            return;
+          }
+          if ((msg.text.split(' ').length <= 20 &&
+                    msg.text.split(' ').every((s) => {
+                      return s.match(symbolRegex);
+                    })) || msg.text === '/start') {
+            if (chats[msg.chat.id].initIntervalID === Number(intervalId) || chats[msg.chat.id].firstMessage) {
+              chats[msg.chat.id].initIntervalID = Number(intervalId);
+              chats[msg.chat.id].firstMessage = false;
+              msg.text === '/start' ?
+                await processMultipleSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) :
+                await processMultipleSymbols(msg);
+            } else {
+              chats[msg.chat.id].involvedSymbols = msg.text === '/start' ?
+                upsertSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) : upsertSymbols(msg);
+              clearInterval(intervalId);
+            }
+          }
+        }
+      }, 4000);
+      // #endregion
     };
   }
-  chats[msg.chat.id].request = msg;
-
-  // Set number of price digits with command "/num" like "/num 10", by default 14
-  if (msg.text.startsWith('/num ') && helper.inRange(+msg.text.match(onlyNumRegex))) {
-    chats[msg.chat.id].priceLength = +msg.text.match(onlyNumRegex);
-  }
-  if (msg.text === '/symbols') {
-    await printAllSymbols(msg.chat.id);
-  } else {
-    // #region Cycle for sending messages
-
-    const intervalId = setInterval(async () => {
-      if (!chats[msg.chat.id].intervalId) chats[msg.chat.id].intervalId = intervalId;
-
-      if (msg.text === '/stop') {
-        terminateSender(msg.chat.id);
-        return;
-      }
-      if ((msg.text.split(' ').length <= 20 &&
-                msg.text.split(' ').every((s) => {
-                  return s.match(symbolRegex);
-                })) || msg.text === '/start') {
-        if (chats[msg.chat.id].initIntervalID === Number(intervalId) || chats[msg.chat.id].firstMessage) {
-          chats[msg.chat.id].initIntervalID = Number(intervalId);
-          chats[msg.chat.id].firstMessage = false;
-          msg.text === '/start' ?
-            await processMultipleSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) :
-            await processMultipleSymbols(msg);
-        } else {
-          chats[msg.chat.id].involvedSymbols = msg.text === '/start' ?
-            upsertSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) : upsertSymbols(msg);
-          clearInterval(intervalId);
-        }
-      }
-    }, 4000);
-    // #endregion
-  };
 });
