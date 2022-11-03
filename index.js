@@ -36,13 +36,12 @@ async function printAllSymbols(chatId) {
   }
 }
 
-async function getTradingPairPrice(symbol, chatId) {
+async function fetchDataFromTgApi(symbol, chatId) {
   try {
     if (symbol.startsWith('["') && symbol.endsWith('"]')) {
       chats[chatId].message = await Axios.get(`${process.env.LAST_PRICE_URI}s=${symbol}`);
       chats[chatId].message?.data.forEach((e) => chats[chatId]
         .involvedSymbols = [...new Set([...chats[chatId].involvedSymbols, e.symbol])]);
-      return symbol;
     }
   } catch (err) {
     await bot.sendMessage(chatId, err?.response?.data?.msg ?
@@ -53,14 +52,19 @@ async function getTradingPairPrice(symbol, chatId) {
 }
 
 function processSingleSymbol(chatId, priceLength, price, smb, idx) {
-  if (!chats[chatId].symbols[smb]) chats[chatId].symbols[smb] = {deviation: 0, prevPrice: 0};
+  // #region Build symbol obj
+  if (!chats[chatId].symbols[smb]) chats[chatId].symbols[smb] = {};
 
   const priceVector = (chats[chatId].symbols[smb].prevPrice > price) ? ' 🍅' : ' 🥝+';
   const procent = helper.isWhatPercentOf(chats[chatId].symbols[smb].prevPrice || price, price);
+  const startPrice = chats[chatId].symbols[smb].startPrice || price;
+  const deviation = helper.isWhatPercentOf(startPrice, price);
 
   chats[chatId].symbols[smb] = {
-    deviation: chats[chatId].symbols[smb].deviation += procent,
+    firstWrite: _.isUndefined(chats[chatId].symbols[smb].firstWrite),
     prevPrice: price,
+    startPrice,
+    deviation,
     priceVector,
     procent,
   };
@@ -110,21 +114,19 @@ function terminateSender(chatId) {
 
 async function processMultipleSymbols(msg) {
   const symbols = upsertSymbols(msg);
-  const returnedSymbols = await getTradingPairPrice('["' + symbols.join('","') + '"]', msg.chat.id);
+  if (await fetchDataFromTgApi('["' + symbols.join('","') + '"]', msg.chat.id) === 'error') return;
+
   let arrOfmessages = [];
 
-  if (returnedSymbols !== 'error') {
-    calculateProcentOfNextPrice(msg.chat.id, chats[msg.chat.id].priceLength);
-    chats[msg.chat.id].message?.data.forEach(async (e) => {
-      if (e.symbol.endsWith('USDT') || e.symbol.endsWith('BUSD')) {
-        e.symbol = e.symbol.slice(0, -4);
-      }
-      arrOfmessages.push(`${e.symbol === 'BTC' ? `🦁${e.symbol}` :
-        `🦎${e.symbol}`}: ${e.price}\n`);
-    });
-  } else {
-    return;
-  }
+  calculateProcentOfNextPrice(msg.chat.id, chats[msg.chat.id].priceLength);
+  chats[msg.chat.id].message?.data.forEach(async (e) => {
+    if (e.symbol.endsWith('USDT') || e.symbol.endsWith('BUSD')) {
+      e.symbol = e.symbol.slice(0, -4);
+    }
+    arrOfmessages.push(`${e.symbol === 'BTC' ? `🦁${e.symbol}` :
+      `🦎${e.symbol}`}: ${e.price}\n`);
+  });
+
   arrOfmessages.sort().map((part, i) => {
     i === 0 && chats[msg.chat.id].involvedSymbols.length > 1 ?
       chats[msg.chat.id].multipartMessage += `🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜\n${part}` :
@@ -141,7 +143,7 @@ async function processMultipleSymbols(msg) {
 
 bot.on('message', async (msg) => {
   if (!_.isEmpty(msg.text)) {
-    if (chats[msg.chat.id]?.firstMessage === undefined) {
+    if (_.isUndefined(chats[msg.chat.id]?.firstMessage)) {
       chats[msg.chat.id] = {
         firstMessage: true,
         involvedSymbols: [],
@@ -159,7 +161,6 @@ bot.on('message', async (msg) => {
       await printAllSymbols(msg.chat.id);
     } else {
       // #region Cycle for sending messages
-
       const intervalId = setInterval(async () => {
         if (chats[msg.chat.id]) {
           if (!chats[msg.chat.id].intervalId) chats[msg.chat.id].intervalId = intervalId;

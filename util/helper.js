@@ -1,7 +1,7 @@
 function isWhatPercentOf(prev, current) {
-  return prev > current ?
+  return +(prev > current ?
     -Math.abs((((prev - current) / current) * 100)) :
-    Math.abs((((prev - current) / current) * 100));
+    Math.abs((((prev - current) / current) * 100))).toFixed(3);
 }
 
 function inRange(x, min = 1, max = 14) {
