@@ -40,14 +40,17 @@ async function fetchDataFromTgApi(symbol, chatId) {
   try {
     if (symbol.startsWith('["') && symbol.endsWith('"]')) {
       chats[chatId].message = await Axios.get(`${process.env.LAST_PRICE_URI}s=${symbol}`);
-      chats[chatId].message?.data.forEach((e) => chats[chatId]
-        .involvedSymbols = [...new Set([...chats[chatId].involvedSymbols, e.symbol])]);
     }
   } catch (err) {
     await bot.sendMessage(chatId, err?.response?.data?.msg ?
       `${err?.response?.data?.msg} Wrong dataset: ${symbol} 😕` : _.isEmpty(err.message) ? 'server error' : err.message);
-    terminateSender(chatId);
+    chats[chatId].involvedSymbols = Object.keys(chats[chatId].symbols || {});
+    chats[chatId].involvedSymbols.length < 1 && terminateSender(chatId);
     return 'error';
+  }
+  if (chats[chatId].message?.data?.length > 0) {
+    chats[chatId].message.data.forEach((e) => chats[chatId]
+      .involvedSymbols = [...new Set([...chats[chatId].involvedSymbols, e.symbol])]);
   }
 }
 
@@ -113,8 +116,17 @@ function terminateSender(chatId) {
 }
 
 async function processMultipleSymbols(msg) {
-  const symbols = upsertSymbols(msg);
-  if (await fetchDataFromTgApi('["' + symbols.join('","') + '"]', msg.chat.id) === 'error') return;
+  if (chats[msg.chat.id].tempSymbols.length > 0) {
+    if (await fetchDataFromTgApi('["' + chats[msg.chat.id].tempSymbols.join('","') + '"]', msg.chat.id) === 'error') {
+      chats[msg.chat.id].tempSymbols.length = 0;
+      return;
+    }
+    chats[msg.chat.id].involvedSymbols = chats[msg.chat.id].involvedSymbols.concat(chats[msg.chat.id].tempSymbols);
+    chats[msg.chat.id].tempSymbols.length = 0;
+  } else {
+    const symbols = upsertSymbols(msg);
+    if (await fetchDataFromTgApi('["' + symbols.join('","') + '"]', msg.chat.id) === 'error') return;
+  }
 
   let arrOfmessages = [];
 
@@ -147,6 +159,7 @@ bot.on('message', async (msg) => {
       chats[msg.chat.id] = {
         firstMessage: true,
         involvedSymbols: [],
+        tempSymbols: [],
         multipartMessage: '',
         symbols: {},
       };
@@ -180,7 +193,7 @@ bot.on('message', async (msg) => {
                 await processMultipleSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) :
                 await processMultipleSymbols(msg);
             } else {
-              chats[msg.chat.id].involvedSymbols = msg.text === '/start' ?
+              chats[msg.chat.id].tempSymbols = msg.text === '/start' ?
                 upsertSymbols({text: 'btc eth etc bnb', chat: {id: msg.chat.id}}) : upsertSymbols(msg);
               clearInterval(intervalId);
             }
