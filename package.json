@@ -14,6 +14,7 @@
   "dependencies": {
     "axios": "^0.27.2",
     "binance": "^2.0.29",
+    "crypto": "^1.0.1",
     "dotenv": "^16.0.0",
     "lodash": "^4.17.21",
     "log-update": "^5.0.1",
